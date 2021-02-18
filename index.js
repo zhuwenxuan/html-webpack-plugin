@@ -23,8 +23,9 @@ const prettyError = require('./lib/errors.js');
 const chunkSorter = require('./lib/chunksorter.js');
 const getHtmlWebpackPluginHooks = require('./lib/hooks.js').getHtmlWebpackPluginHooks;
 const { assert } = require('console');
-
 const fsReadFileAsync = promisify(fs.readFile);
+/** WeakMap to track if this compiler is already using the html-webpack-plugin */
+const hookedWebpackCompilers = new WeakSet();
 
 class HtmlWebpackPlugin {
   /**
@@ -104,6 +105,12 @@ class HtmlWebpackPlugin {
       entryOptions.forEach((instanceOptions) => {
         hookIntoCompiler(compiler, instanceOptions, this);
       });
+
+      // Hook into the compiler once
+      if (!hookedWebpackCompilers.has(compiler)) {
+        hookedWebpackCompilers.add(compiler);
+        hookIntoCompilerOnce(compiler);
+      }
     });
   }
 
@@ -123,12 +130,20 @@ class HtmlWebpackPlugin {
       return Promise.reject(new Error('The child compilation didn\'t provide a result'));
     }
     // The LibraryTemplatePlugin stores the template result in a local variable.
-    // To extract the result during the evaluation this part has to be removed.
-    if (source && source.indexOf('HTML_WEBPACK_PLUGIN_RESULT') >= 0) {
+    // By adding it to the end the value gets extracted during evaluation
+    if (source.indexOf('HTML_WEBPACK_PLUGIN_RESULT') >= 0) {
       source += ';\nHTML_WEBPACK_PLUGIN_RESULT';
     }
     const templateWithoutLoaders = templateFilename.replace(/^.+!/, '').replace(/\?.+$/, '');
-    const vmContext = vm.createContext({ HTML_WEBPACK_PLUGIN: true, require: require, htmlWebpackPluginPublicPath: publicPath, ...global });
+    const vmContext = vm.createContext({
+      ...global,
+      HTML_WEBPACK_PLUGIN: true,
+      require: require,
+      htmlWebpackPluginPublicPath:
+      publicPath,
+      URL: require('url').URL,
+      __filename: templateWithoutLoaders
+    });
     const vmScript = new vm.Script(source, { filename: templateWithoutLoaders });
     // Evaluate code and cast to string
     let newSource;
@@ -147,7 +162,8 @@ class HtmlWebpackPlugin {
 }
 
 /**
- * apply is called by the webpack main compiler during the start phase
+ * connect the html-webpack-plugin to the webpack compiler lifecycle hooks
+ *
  * @param {import('webpack').Compiler} compiler
  * @param {ProcessedHtmlWebpackOptions} options
  * @param {HtmlWebpackPlugin} plugin
@@ -1051,6 +1067,21 @@ function hookIntoCompiler (compiler, options, plugin) {
     files.sort();
     return files;
   }
+}
+
+/**
+ * connect the html-webpack-plugin to the webpack compiler lifecycle hooks
+ * this function is called only once per compiler
+ *
+ * @param {import('webpack').Compiler} compiler
+ */
+function hookIntoCompilerOnce (compiler) {
+  // Add support for relative URL calls for all templates
+  // compiled by the HtmlWebpackCompiler
+  compiler.options.module.defaultRules.push({
+    compiler: /HtmlWebpackCompiler/,
+    parser: { url: 'relative' }
+  });
 }
 
 /**
